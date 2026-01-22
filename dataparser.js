@@ -16,6 +16,39 @@ function safeParseFloat(value, places=2) {
     return (isNaN(parsed) || parsed == null) ? null : parsed;
 }
 
+function getSpcIndex(label) {
+    switch (label) {
+        case 'MRGL': return '1';
+        case 'SLGT': return '2';
+        case 'ENH': return '3';
+        case 'MDT': return '4';
+        case 'HIGH': return '5';
+        default: return '0';
+    }
+}
+
+const pointInRing = (point, ring) => {
+    const [px, py] = point;
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    const intersect = yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+    }
+    return inside;
+};
+
+const pointInPolygon = (point, polygon) => {
+    if (!Array.isArray(polygon) || polygon.length === 0) return false;
+    const inOuter = pointInRing(point, polygon[0]);
+    if (!inOuter) return false;
+    for (let i = 1; i < polygon.length; i++) {
+    if (pointInRing(point, polygon[i])) return false;
+    }
+    return true;
+};
+
 function parseWeatherCondition(conditiontext) {
     // Guess based on the conditiontext what the condition is and convert
     // it to a standard human-readable condition and code.
@@ -124,9 +157,57 @@ function parseWeatherCondition(conditiontext) {
     }
 }
 
-export function parseWeatherData(raw_owm, raw_nws, raw_alerts) {
+export function parseWeatherData(point, raw_owm, raw_nws, raw_alerts, spc_outlooks) {
     var parsedData = {};
     var parsedalerts = [];
+
+    // Parse SPC Risks
+    var risks = [];
+    var i = 0;
+
+    if (spc_outlooks && Array.isArray(spc_outlooks)) {
+        spc_outlooks.forEach((outlook) => {
+            let bestFeature = null;
+            outlook.features?.forEach((feature) => {
+                if (!feature?.geometry || !feature?.properties) return;
+                const { geometry, properties } = feature;
+
+                const checkPolygon = (polyCoords) => {
+                    if (pointInPolygon(point, polyCoords)) {
+                        if (!bestFeature || (properties.DN ?? 0) > (bestFeature.properties.DN ?? 0)) {
+                            bestFeature = feature;
+                        }
+                    }
+                };
+
+                if (geometry.type === 'Polygon') {
+                    checkPolygon(geometry.coordinates);
+                } else if (geometry.type === 'MultiPolygon') {
+                    geometry.coordinates.forEach((poly) => checkPolygon(poly));
+                }
+            });
+
+            if (bestFeature) {
+                const { LABEL, LABEL2, fill, stroke } = bestFeature.properties;
+                risks.push({
+                    date: new Date(new Date().setDate(new Date().getDate() + i)).toISOString().split('T')[0],
+                    level: LABEL,
+                    description: LABEL2,
+                    color: fill,
+                    altcolor: stroke
+                });
+            } else {
+                risks.push({
+                    date: new Date(new Date().setDate(new Date().getDate() + i)).toISOString().split('T')[0],
+                    level: "NONE",
+                    description: "No thunderstorms forecast for this location.",
+                    color: null,
+                    altcolor: null
+                });
+            }
+            i++;
+        });
+    }
 
     // Parse alerts
     try {
@@ -346,6 +427,7 @@ export function parseWeatherData(raw_owm, raw_nws, raw_alerts) {
         },
         alerts: parsedalerts,
         forecasts: {
+            spc: risks || [],
             minutely: minutelyforecast || [],
             hourly: hourlyforecast || [],
             daily: dailyforecast || [],

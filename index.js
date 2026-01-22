@@ -60,9 +60,15 @@ app.get('/onecall', async (req, res) => {
         let raw_owm = null;
         let raw_nws = null;
         let raw_alerts = null;
+        let spcRiskD1 = null;
+        let spcRiskD2 = null;
+        let spcRiskD3 = null;
         let nws_status = "NOT FETCHED";
         let owm_status = "NOT FETCHED";
         let alerts_status = "NOT FETCHED";
+        let spc_d1_status = "NOT FETCHED";
+        let spc_d2_status = "NOT FETCHED";
+        let spc_d3_status = "NOT FETCHED";
 
         try {
             const owmResponse = await fetch(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&appid=${process.env.OWM_API_KEY}`);
@@ -100,21 +106,53 @@ app.get('/onecall', async (req, res) => {
                 alerts_status = "OK";
             } catch (err) {
                 logMessage(`Error fetching alert data from NWS: ${err.message}`, 'error', loglevel);
-                res.status(500).json({ status: "ERROR", code: 500, message: "Failed to fetch data from NWS API (alerts)" });
                 alerts_status = "FETCH ERROR";
                 return;
             }
-        } else {
-            raw_alerts = {};
-            alerts_status = "NOT FETCHED";
+            try {
+                const spcResponse = await fetch('https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson');
+                spcRiskD1 = await spcResponse.json();
+                spc_d1_status = "OK";
+            } catch (err){
+                logMessage(`Error fetching SPC outlook data: ${err.message}`, 'error', loglevel);
+                spcRiskD1 = null;
+                spc_d1_status = "FETCH ERROR";
+            }
+            try {
+                const spcResponse = await fetch('https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson');
+                spcRiskD2 = await spcResponse.json();
+                spc_d2_status = "OK";
+            } catch (err){
+                logMessage(`Error fetching SPC outlook data: ${err.message}`, 'error', loglevel);
+                spcRiskD2 = null;
+                spc_d2_status = "FETCH ERROR";
+            }
+            try {
+                const spcResponse = await fetch('https://www.spc.noaa.gov/products/outlook/day3otlk_cat.nolyr.geojson');
+                spcRiskD3 = await spcResponse.json();
+                spc_d3_status = "OK";
+            } catch (err){
+                logMessage(`Error fetching SPC outlook data: ${err.message}`, 'error', loglevel);
+                spcRiskD3 = null;
+                spc_d3_status = "FETCH ERROR";
+            }
         }
 
-        const response = parseWeatherData(raw_owm, raw_nws, raw_alerts);
+        // SPC polygons are [lon, lat]; build the point accordingly and ensure numeric types
+        const response = parseWeatherData([
+            parseFloat(lon),
+            parseFloat(lat)
+        ], raw_owm, raw_nws, raw_alerts, [spcRiskD1, spcRiskD2, spcRiskD3]);
 
         res.json({ status: {
             owm: owm_status,
             nws: nws_status,
-            alerts: alerts_status
+            alerts: alerts_status,
+            spc: {
+                day1: spc_d1_status,
+                day2: spc_d2_status,
+                day3: spc_d3_status
+            }
         }, data: response });
 
     } catch (err) {
