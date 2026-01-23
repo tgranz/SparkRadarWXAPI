@@ -26,7 +26,7 @@ app.use(express.json());
 // Helper to safely fetch SPC outlook JSON with content-type and timeout checks
 async function fetchSpcOutlook(url, label) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    const timeout = setTimeout(() => controller.abort(), 5000);
 
     try {
         const response = await fetch(url, { signal: controller.signal });
@@ -52,8 +52,11 @@ async function fetchSpcOutlook(url, label) {
 
         return { data: parsed, status: 'OK' };
     } catch (err) {
-        const detail = err.name === 'AbortError' ? 'request timed out' : err.message;
-        logMessage(`Error fetching SPC outlook (${label}): ${detail}`, 'error', loglevel);
+        if (err.name === 'AbortError') {
+            logMessage(`SPC outlook fetch timeout (${label}): request exceeded 5 seconds`, 'warn', loglevel);
+            return { data: null, status: 'FETCH TIMEOUT' };
+        }
+        logMessage(`Error fetching SPC outlook (${label}): ${err.message}`, 'error', loglevel);
         return { data: null, status: 'FETCH ERROR' };
     } finally {
         clearTimeout(timeout);
@@ -108,9 +111,24 @@ app.get('/onecall', async (req, res) => {
         let spc_d3_status = "NOT FETCHED";
 
         try {
-            const owmResponse = await fetch(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&appid=${process.env.OWM_API_KEY}`);
-            raw_owm = await owmResponse.json();
-            owm_status = "OK";
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
+            try {
+                const owmResponse = await fetch(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&appid=${process.env.OWM_API_KEY}`, { signal: controller.signal });
+                clearTimeout(timeout);
+                raw_owm = await owmResponse.json();
+                owm_status = "OK";
+            } catch (fetchErr) {
+                clearTimeout(timeout);
+                if (fetchErr.name === 'AbortError') {
+                    logMessage(`OpenWeatherMap fetch timeout: request exceeded 5 seconds`, 'warn', loglevel);
+                    owm_status = "FETCH TIMEOUT";
+                } else {
+                    logMessage(`Error fetching data from OpenWeatherMap: ${fetchErr.message}`, 'error', loglevel);
+                    owm_status = "FETCH ERROR";
+                }
+                raw_owm = {};
+            }
         } catch (err) {
             logMessage(`Error fetching data from OpenWeatherMap: ${err.message}`, 'error', loglevel);
             raw_owm = {};
@@ -118,28 +136,54 @@ app.get('/onecall', async (req, res) => {
         }
 
         try {
-            const nwsResponse = await fetch(`https://forecast.weather.gov/MapClick.php?lat=${lat}&lon=${lon}&FcstType=json`);
-            raw_nws = await nwsResponse.json();
-            nws_status = "OK";
-        } catch (err) {
-            if (err.toString().includes("is not valid JSON")) {
-                // No NWS data available for this location
-                logMessage(`No NWS data available for lat: ${lat}, lon: ${lon}`, 'debug', loglevel);
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
+            try {
+                const nwsResponse = await fetch(`https://forecast.weather.gov/MapClick.php?lat=${lat}&lon=${lon}&FcstType=json`, { signal: controller.signal });
+                clearTimeout(timeout);
+                raw_nws = await nwsResponse.json();
+                nws_status = "OK";
+            } catch (fetchErr) {
+                clearTimeout(timeout);
+                if (fetchErr.name === 'AbortError') {
+                    logMessage(`NWS fetch timeout: request exceeded 5 seconds`, 'warn', loglevel);
+                    nws_status = "FETCH TIMEOUT";
+                } else if (fetchErr.toString().includes("is not valid JSON")) {
+                    // No NWS data available for this location
+                    logMessage(`No NWS data available for lat: ${lat}, lon: ${lon}`, 'debug', loglevel);
+                    nws_status = "NO DATA";
+                } else {
+                    logMessage(`Error fetching data from NWS: ${fetchErr.message}`, 'error', loglevel);
+                    nws_status = "FETCH ERROR";
+                }
                 raw_nws = {};
-                nws_status = "NO DATA";
-
-            } else {
-                logMessage(`Error fetching data from NWS: ${err.message}`, 'error', loglevel);
-                raw_nws = {};
-                nws_status = "FETCH ERROR";
             }
+        } catch (err) {
+            logMessage(`Error fetching data from NWS: ${err.message}`, 'error', loglevel);
+            raw_nws = {};
+            nws_status = "FETCH ERROR";
         }
 
         if (nws_status == "OK"){
             try {
-                const alertsResponse = await fetch(`https://api.weather.gov/alerts/active/zone/${raw_nws?.location?.zone || ''}`);
-                raw_alerts = await alertsResponse.json();
-                alerts_status = "OK";
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 5000);
+                try {
+                    const alertsResponse = await fetch(`https://api.weather.gov/alerts/active/zone/${raw_nws?.location?.zone || ''}`, { signal: controller.signal });
+                    clearTimeout(timeout);
+                    raw_alerts = await alertsResponse.json();
+                    alerts_status = "OK";
+                } catch (fetchErr) {
+                    clearTimeout(timeout);
+                    if (fetchErr.name === 'AbortError') {
+                        logMessage(`NWS alerts fetch timeout: request exceeded 5 seconds`, 'warn', loglevel);
+                        alerts_status = "FETCH TIMEOUT";
+                    } else {
+                        logMessage(`Error fetching alert data from NWS: ${fetchErr.message}`, 'error', loglevel);
+                        alerts_status = "FETCH ERROR";
+                    }
+                    raw_alerts = {};
+                }
             } catch (err) {
                 logMessage(`Error fetching alert data from NWS: ${err.message}`, 'error', loglevel);
                 alerts_status = "FETCH ERROR";
