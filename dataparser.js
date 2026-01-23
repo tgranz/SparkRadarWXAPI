@@ -168,7 +168,7 @@ export function parseWeatherData(point, raw_owm, raw_nws, raw_alerts, spc_outloo
     if (spc_outlooks && Array.isArray(spc_outlooks)) {
         spc_outlooks.forEach((outlook) => {
             let bestFeature = null;
-            outlook.features?.forEach((feature) => {
+            outlook?.features?.forEach((feature) => {
                 if (!feature?.geometry || !feature?.properties) return;
                 const { geometry, properties } = feature;
 
