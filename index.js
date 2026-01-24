@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import { logMessage } from './logging.js';
 import { parseWeatherData } from './dataparser.js';
 import fetch from 'node-fetch';
+import fs from 'fs';
 
 // ===== Setup =====
 
@@ -24,9 +25,10 @@ const app = express();
 app.use(express.json());
 
 // Helper to safely fetch SPC outlook JSON with content-type and timeout checks
+// Timeout set to 10 seconds because it is run in the background
 async function fetchSpcOutlook(url, label) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
+    const timeout = setTimeout(() => controller.abort(), 10000);
 
     try {
         const response = await fetch(url, { signal: controller.signal });
@@ -112,7 +114,7 @@ app.get('/onecall', async (req, res) => {
 
         try {
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 5000);
+            const timeout = setTimeout(() => controller.abort(), 3000);
             try {
                 const owmResponse = await fetch(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&appid=${process.env.OWM_API_KEY}`, { signal: controller.signal });
                 clearTimeout(timeout);
@@ -120,14 +122,25 @@ app.get('/onecall', async (req, res) => {
                 owm_status = "OK";
             } catch (fetchErr) {
                 clearTimeout(timeout);
-                if (fetchErr.name === 'AbortError') {
-                    logMessage(`OpenWeatherMap fetch timeout: request exceeded 5 seconds`, 'warn', loglevel);
-                    owm_status = "FETCH TIMEOUT";
-                } else {
-                    logMessage(`Error fetching data from OpenWeatherMap: ${fetchErr.message}`, 'error', loglevel);
-                    owm_status = "FETCH ERROR";
+                // Sometimes OWM randomly fails. Try one more time.
+                try {
+                    const retryController = new AbortController();  // NEW controller
+                    const retryTimeout = setTimeout(() => retryController.abort(), 3000);
+                    const owmResponse = await fetch(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&appid=${process.env.OWM_API_KEY}`, { signal: retryController.signal });
+                    clearTimeout(retryTimeout);
+                    raw_owm = await owmResponse.json();
+                    owm_status = "OK";
+                } catch (fetchErr) {
+                    clearTimeout(timeout);
+                    if (fetchErr.name === 'AbortError') {
+                        logMessage(`OpenWeatherMap fetch timeout: request exceeded 5 seconds`, 'warn', loglevel);
+                        owm_status = "FETCH TIMEOUT";
+                    } else {
+                        logMessage(`Error fetching data from OpenWeatherMap: ${fetchErr.message}`, 'error', loglevel);
+                        owm_status = "FETCH ERROR";
+                    }
+                    raw_owm = {};
                 }
-                raw_owm = {};
             }
         } catch (err) {
             logMessage(`Error fetching data from OpenWeatherMap: ${err.message}`, 'error', loglevel);
@@ -137,7 +150,7 @@ app.get('/onecall', async (req, res) => {
 
         try {
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 5000);
+            const timeout = setTimeout(() => controller.abort(), 3000);
             try {
                 const nwsResponse = await fetch(`https://forecast.weather.gov/MapClick.php?lat=${lat}&lon=${lon}&FcstType=json`, { signal: controller.signal });
                 clearTimeout(timeout);
@@ -167,7 +180,7 @@ app.get('/onecall', async (req, res) => {
         if (nws_status == "OK"){
             try {
                 const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 5000);
+                const timeout = setTimeout(() => controller.abort(), 3000);
                 try {
                     const alertsResponse = await fetch(`https://api.weather.gov/alerts/active/zone/${raw_nws?.location?.zone || ''}`, { signal: controller.signal });
                     clearTimeout(timeout);
@@ -189,17 +202,13 @@ app.get('/onecall', async (req, res) => {
                 alerts_status = "FETCH ERROR";
                 raw_alerts = {};
             }
-            const day1 = await fetchSpcOutlook('https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson', 'day1');
-            spcRiskD1 = day1.data;
-            spc_d1_status = day1.status;
-
-            const day2 = await fetchSpcOutlook('https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson', 'day2');
-            spcRiskD2 = day2.data;
-            spc_d2_status = day2.status;
-
-            const day3 = await fetchSpcOutlook('https://www.spc.noaa.gov/products/outlook/day3otlk_cat.nolyr.geojson', 'day3');
-            spcRiskD3 = day3.data;
-            spc_d3_status = day3.status;
+            const spcCache = readSpcCache();
+            spcRiskD1 = spcCache.day1;
+            spcRiskD2 = spcCache.day2;
+            spcRiskD3 = spcCache.day3;
+            spc_d1_status = spcCache.day1 ? "CACHED" : "NOT AVAILABLE";
+            spc_d2_status = spcCache.day2 ? "CACHED" : "NOT AVAILABLE";
+            spc_d3_status = spcCache.day3 ? "CACHED" : "NOT AVAILABLE";
         }
 
         // SPC polygons are [lon, lat]; build the point accordingly and ensure numeric types
@@ -226,7 +235,55 @@ app.get('/onecall', async (req, res) => {
 });
 
 
+// ===== SPC Outlook Fetcher =====
+// Fetch SPC outlooks every 30 minutes to cut down on latency for /onecall requests
+
+// Read SPC cache from file
+function readSpcCache() {
+    try {
+        const cacheFile = './spc_cache.json';
+        if (fs.existsSync(cacheFile)) {
+            const data = fs.readFileSync(cacheFile, 'utf8');
+            return JSON.parse(data);
+        }
+    } catch (err) {
+        logMessage(`Error reading SPC cache: ${err.message}`, 'warn', loglevel);
+    }
+    return { day1: null, day2: null, day3: null, lastUpdated: null };
+}
+
+// Write SPC cache to file
+function writeSpcCache(day1, day2, day3, lastUpdated) {
+    try {
+        const cacheFile = './spc_cache.json';
+        const cacheData = { day1, day2, day3, lastUpdated };
+        fs.writeFileSync(cacheFile, JSON.stringify(cacheData, null, 2), 'utf8');
+        logMessage(`SPC cache updated successfully`, 'debug', loglevel);
+    } catch (err) {
+        logMessage(`Error writing SPC cache: ${err.message}`, 'error', loglevel);
+    }
+}
+
+// Update SPC cache by fetching all three outlooks
+async function updateSpcCache() {
+    logMessage(`Updating SPC cache...`, 'debug', loglevel);
+    try {
+        const day1 = await fetchSpcOutlook('https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson', 'day1');
+        const day2 = await fetchSpcOutlook('https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson', 'day2');
+        const day3 = await fetchSpcOutlook('https://www.spc.noaa.gov/products/outlook/day3otlk_cat.nolyr.geojson', 'day3');
+        
+        writeSpcCache(day1.data, day2.data, day3.data, new Date().toISOString());
+    } catch (err) {
+        logMessage(`Error updating SPC cache: ${err.message}`, 'error', loglevel);
+    }
+}
 // ===== Startup =====
+
+// Update SPC cache immediately on startup
+await updateSpcCache();
+
+// Set up interval to update SPC cache every 30 minutes
+setInterval(updateSpcCache, 30 * 60 * 1000);
 
 // Start the server
 app.listen(port, () => {
