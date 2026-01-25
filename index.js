@@ -1,5 +1,5 @@
 // Required imports
-import express from 'express';
+import express, { raw } from 'express';
 import dotenv from 'dotenv';
 import { logMessage } from './logging.js';
 import { parseWeatherData } from './dataparser.js';
@@ -65,6 +65,34 @@ async function fetchSpcOutlook(url, label) {
     }
 }
 
+// Fetch SPC Mesoscale Discussions from ArcGIS MapServer
+async function fetchSpcMesoscaleDiscussions() {
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+
+    try {
+        const response = await fetch(`https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/spc_mesoscale_discussion/MapServer/0/query?where=1%3D1&outFields=*&f=geojson&returnGeometry=true`, { signal: controller.signal });
+        clearTimeout(timeout);
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        return { data, status: 'OK' };
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            logMessage(`SPC MCD fetch timeout: request exceeded 10 seconds`, 'warn', loglevel);
+            return { data: null, status: 'FETCH TIMEOUT' };
+        }
+        logMessage(`Error fetching SPC Mesoscale Discussions: ${err.message}`, 'error', loglevel);
+        return { data: null, status: 'FETCH ERROR' };
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
 
 // ===== Endpoints =====
 
@@ -81,6 +109,7 @@ app.get('/', (req, res) => {
 });
 
 
+// OneCall main route
 app.get('/onecall', async (req, res) => {
     logMessage(`Received request at /onecall`, 'debug', loglevel);
     try {
@@ -105,16 +134,18 @@ app.get('/onecall', async (req, res) => {
         let spcRiskD1 = null;
         let spcRiskD2 = null;
         let spcRiskD3 = null;
+        let raw_mcd = null;
         let nws_status = "NOT FETCHED";
         let owm_status = "NOT FETCHED";
         let alerts_status = "NOT FETCHED";
         let spc_d1_status = "NOT FETCHED";
         let spc_d2_status = "NOT FETCHED";
         let spc_d3_status = "NOT FETCHED";
+        let mcd_status = "NOT FETCHED";
 
         try {
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 3000);
+            const timeout = setTimeout(() => controller.abort(), 5000);
             try {
                 const owmResponse = await fetch(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&appid=${process.env.OWM_API_KEY}`, { signal: controller.signal });
                 clearTimeout(timeout);
@@ -125,7 +156,7 @@ app.get('/onecall', async (req, res) => {
                 // Sometimes OWM randomly fails. Try one more time.
                 try {
                     const retryController = new AbortController();  // NEW controller
-                    const retryTimeout = setTimeout(() => retryController.abort(), 3000);
+                    const retryTimeout = setTimeout(() => retryController.abort(), 5000);
                     const owmResponse = await fetch(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&appid=${process.env.OWM_API_KEY}`, { signal: retryController.signal });
                     clearTimeout(retryTimeout);
                     raw_owm = await owmResponse.json();
@@ -150,7 +181,7 @@ app.get('/onecall', async (req, res) => {
 
         try {
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 3000);
+            const timeout = setTimeout(() => controller.abort(), 5000);
             try {
                 const nwsResponse = await fetch(`https://forecast.weather.gov/MapClick.php?lat=${lat}&lon=${lon}&FcstType=json`, { signal: controller.signal });
                 clearTimeout(timeout);
@@ -211,21 +242,35 @@ app.get('/onecall', async (req, res) => {
             spc_d3_status = spcCache.day3 ? "CACHED" : "NOT AVAILABLE";
         }
 
+        // Read SPC Mesoscale Discussions (MCD) from cache regardless of NWS status
+        try {
+            const mcdCache = readMcdCache();
+            raw_mcd = mcdCache || null;
+            mcd_status = (mcdCache && mcdCache.data && Array.isArray(mcdCache.data.features) && mcdCache.data.features.length > 0)
+                ? "CACHED"
+                : "NOT AVAILABLE";
+        } catch (err) {
+            logMessage(`Error reading MCD cache: ${err.message}`, 'warn', loglevel);
+            raw_mcd = null;
+            mcd_status = "FETCH ERROR";
+        }
+
         // SPC polygons are [lon, lat]; build the point accordingly and ensure numeric types
         const response = parseWeatherData([
             parseFloat(lon),
             parseFloat(lat)
-        ], raw_owm, raw_nws, raw_alerts, [spcRiskD1, spcRiskD2, spcRiskD3]);
+        ], raw_owm, raw_nws, raw_alerts, [spcRiskD1, spcRiskD2, spcRiskD3], raw_mcd);
 
         res.json({ status: {
             owm: owm_status,
             nws: nws_status,
             alerts: alerts_status,
+            mcd: mcd_status,
             spc: {
                 day1: spc_d1_status,
                 day2: spc_d2_status,
                 day3: spc_d3_status
-            }
+            },
         }, data: response });
 
     } catch (err) {
@@ -277,13 +322,62 @@ async function updateSpcCache() {
         logMessage(`Error updating SPC cache: ${err.message}`, 'error', loglevel);
     }
 }
+
+
+// ===== SPC MD Fetcher =====
+// Read MCD cache from file
+function readMcdCache() {
+    try {
+        const cacheFile = './mcd_cache.json';
+        if (fs.existsSync(cacheFile)) {
+            const data = fs.readFileSync(cacheFile, 'utf8');
+            return JSON.parse(data);
+        }
+    } catch (err) {
+        logMessage(`Error reading MCD cache: ${err.message}`, 'warn', loglevel);
+    }
+    return { data: null, lastUpdated: null };
+}
+
+// Write MCD cache to file
+function writeMcdCache(data, lastUpdated) {
+    try {
+        const cacheFile = './mcd_cache.json';
+        const cacheData = { data, lastUpdated };
+        fs.writeFileSync(cacheFile, JSON.stringify(cacheData, null, 2), 'utf8');
+        logMessage(`MCD cache updated successfully`, 'debug', loglevel);
+    } catch (err) {
+        logMessage(`Error writing MCD cache: ${err.message}`, 'error', loglevel);
+    }
+}
+
+async function updateMcdCache() {
+    logMessage(`Updating MCD cache...`, 'debug', loglevel);
+    try {
+        const result = await fetchSpcMesoscaleDiscussions();
+        if (result.status === 'OK') {
+            writeMcdCache(result.data, new Date().toISOString());
+        } else {
+            logMessage(`MCD cache update failed with status: ${result.status}`, 'warn', loglevel);
+        }
+    } catch (err) {
+        logMessage(`Error updating MCD cache: ${err.message}`, 'error', loglevel);
+    }
+}
+
 // ===== Startup =====
 
 // Update SPC cache immediately on startup
 await updateSpcCache();
 
+// Update MCD cache immediately on startup
+await updateMcdCache();
+
 // Set up interval to update SPC cache every 30 minutes
 setInterval(updateSpcCache, 30 * 60 * 1000);
+
+// Set up interval to update MCD cache every 5 minutes
+setInterval(updateMcdCache, 5 * 60 * 1000);
 
 // Start the server
 app.listen(port, () => {

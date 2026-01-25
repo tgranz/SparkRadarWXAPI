@@ -49,6 +49,76 @@ const pointInPolygon = (point, polygon) => {
     return true;
 };
 
+function findColorForAlert(event) {
+    switch(event) {
+    case "Air Quality Alert":
+        return "#768b00";
+    case "Avalanche Warning":
+        return "#ff00ff";
+    case "Dust Advisory":
+        return "#706e00";
+    case "Dust Storm Warning":
+        return "#776b00";
+    case "Flash Flood Emergency":
+        return "#00ff00";
+    case "Flash Flood Warning":
+        return "#00ff00";
+    case "Flood Advisory":
+        return "#00538b";
+    case "Flood Warning":
+        return "#1E90FF";
+    case "Flood Watch":
+        return "#60fd82";
+    case "Marine Weather Statement":
+        return "#690083";
+    case "PDS Tornado Warning":
+        return "#e900dd";
+    case "Severe Thunderstorm Warning":
+        return "#f1a500";
+    case "Snow Squall Warning":
+        return "#0096aa";
+    case "Special Marine Warning":
+        return "#8b3300";
+    case "Special Weather Statement":
+        return "#eeff00";
+    case "Tornado Emergency":
+        return "#9f00e9";
+    case "Tornado Warning":
+        return "#e90000";
+    case "Tropical Storm Watch":
+        return "#3f0072";
+    case "Winter Storm Warning":
+        return "#00d4ff";
+    case "Winter Weather Advisory":
+        return "#0087af";
+    case "Winter Storm Watch":
+        return "#00aaff";
+    case "Ice Storm Warning":
+        return "#0047ab";
+    case "High Wind Warning":
+        return "#ff8000";
+    case "Extreme Cold Warning":
+        return "#00ffff";
+    case "Heat Advisory":
+        return "#ff7000";
+    case "Heat Warning":
+        return "#ff2000";
+    case "Red Flag Warning":
+        return "#ff00c8ff";
+    case "Extreme Wind Warning":
+        return "#d400ffff";
+    default:
+        if (event.includes("Warning")) {
+            return "#FF0000";
+        } else if (event.includes("Watch")) {
+            return "#FFA500";
+        } else {
+            return "#FFCC00";
+        }
+    }
+}
+
+
 function parseWeatherCondition(conditiontext) {
     // Guess based on the conditiontext what the condition is and convert
     // it to a standard human-readable condition and code.
@@ -157,7 +227,7 @@ function parseWeatherCondition(conditiontext) {
     }
 }
 
-export function parseWeatherData(point, raw_owm, raw_nws, raw_alerts, spc_outlooks) {
+export function parseWeatherData(point, raw_owm, raw_nws, raw_alerts, spc_outlooks, raw_mcd) {
     var parsedData = {};
     var parsedalerts = [];
 
@@ -209,6 +279,66 @@ export function parseWeatherData(point, raw_owm, raw_nws, raw_alerts, spc_outloo
         });
     }
 
+    // Parse mesoscale discussions (filter to active for current location)
+    var parsedMcds = [];
+    try {
+        const now = new Date();
+        raw_mcd?.data?.features?.forEach((mcd) => {
+            const geometry = mcd?.geometry;
+            if (!geometry) return;
+
+            // Extract expiry HHMM from folderpath like "MD 0045 Active Till 2345 UTC"
+            let timeStr = null;
+            const folder = mcd?.properties?.folderpath || '';
+            if (folder.includes('Till')) {
+                timeStr = folder.split('Till')[1]?.replace('UTC', '')?.trim() || null;
+            }
+
+            let expiresIso = null;
+            let expiresDate = null;
+            if (timeStr && /^\d{4}$/.test(timeStr)) {
+                const issueDate = new Date(mcd?.properties?.idp_filedate);
+                if (!isNaN(issueDate.getTime())) {
+                    const hh = parseInt(timeStr.slice(0, 2), 10);
+                    const mm = parseInt(timeStr.slice(2, 4), 10);
+                    expiresDate = new Date(Date.UTC(
+                        issueDate.getUTCFullYear(),
+                        issueDate.getUTCMonth(),
+                        issueDate.getUTCDate(),
+                        hh, mm, 0
+                    ));
+                    expiresIso = expiresDate.toISOString();
+                }
+            }
+
+            // Spatial filter: point must be inside polygon (support Polygon and MultiPolygon)
+            let containsPoint = false;
+            if (geometry.type === 'Polygon') {
+                containsPoint = pointInPolygon(point, geometry.coordinates);
+            } else if (geometry.type === 'MultiPolygon') {
+                for (const poly of geometry.coordinates) {
+                    if (pointInPolygon(point, poly)) { containsPoint = true; break; }
+                }
+            }
+
+            // Temporal filter: if expiry known, require now <= expiry
+            const isActiveByTime = expiresDate ? now <= expiresDate : true;
+
+            if (containsPoint && isActiveByTime) {
+                parsedMcds.push({
+                    geometry: geometry,
+                    number: parseInt((mcd?.properties?.name || '').replace('MD ', '')) || null,
+                    issued: (new Date(mcd?.properties?.idp_filedate)).toISOString() || null,
+                    expires: expiresIso || null,
+                    url: mcd?.properties?.popupinfo || null,
+                    title: mcd?.properties?.folderpath || mcd?.properties?.name || null,
+                });
+            }
+        });
+    } catch (e) {
+        logMessage(`Unable to parse MCDs: ${e.message}`, 'warn', loglevel);
+    }
+
     // Parse alerts
     try {
         raw_alerts?.features?.forEach((alert) => {
@@ -225,6 +355,7 @@ export function parseWeatherData(point, raw_owm, raw_nws, raw_alerts, spc_outloo
                 product: {
                     areas: alert?.properties?.areaDesc || null,
                     event: alert?.properties?.event || null,
+                    color: findColorForAlert(alert?.properties?.event || '') || null,
                     headline: alert?.properties?.headline || null,
                     description: alert?.properties?.description.replace(/\n\n/g, "\n").replace(/\n/g, " ") || null,
                     instructions: alert?.properties?.instruction.replace(/\n\n/g, "\n").replace(/\n/g, " ") || null,
@@ -426,13 +557,14 @@ export function parseWeatherData(point, raw_owm, raw_nws, raw_alerts, spc_outloo
                 : safeParseFloat(raw_owm?.current?.pressure) || null, // hPa (mb)
         },
         alerts: parsedalerts,
+        mesoscale_discussions: parsedMcds || [],
         forecasts: {
             spc: risks || [],
             minutely: minutelyforecast || [],
             hourly: hourlyforecast || [],
             daily: dailyforecast || [],
-        } 
-    }
+        }
+    };
 
     logMessage(`Parsed weather data.`, 'debug', loglevel);
     return parsedData;

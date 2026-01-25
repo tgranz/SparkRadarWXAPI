@@ -2,3 +2,4 @@
 node_modules/
 app.log
 spc_cache.json
+mcd_cache.json
