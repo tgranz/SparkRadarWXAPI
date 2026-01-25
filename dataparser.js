@@ -153,6 +153,10 @@ function parseWeatherCondition(conditiontext) {
 
     if (!conditiontext || conditiontext.length === 0) {
         return null;
+    } else if (conditiontext.toLowerCase().includes("cold")) {
+        return { condition: "Cold", code: 733 };
+    } else if (conditiontext.toLowerCase().includes("hot")) {
+        return { condition: "Hot", code: 733 };
     } else if (conditiontext.toLowerCase().includes("shower")) {
         // Find intensity
         if (conditiontext.toLowerCase().includes("light")) {
