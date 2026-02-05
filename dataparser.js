@@ -433,8 +433,8 @@ export function parseWeatherData(point, raw_owm, raw_nws, raw_alerts, spc_outloo
                 // Daytime segment
                 conditionDay = parseWeatherCondition(nwsWeather || null) || parseWeatherCondition(dayWeatherDesc || null) || { condition: "Unknown", code: 0, raw: dayWeatherDesc };
                 conditionNight = parseWeatherCondition(nwsWeatherNext || null) || { condition: "Unknown", code: 0, raw: nwsWeatherNext };
-                highTemp = safeParseFloat(nwsTempValue * 5/9 + 273.15) || safeParseFloat(day?.temp?.max) || null;
-                lowTemp = safeParseFloat(nwsTempValueNext * 5/9 + 273.15) || safeParseFloat(day?.temp?.min) || null;
+                highTemp = safeParseFloat((nwsTempValue - 32) * 5/9 + 273.15) || safeParseFloat(day?.temp?.max) || null;
+                lowTemp = safeParseFloat((nwsTempValueNext - 32) * 5/9 + 273.15) || safeParseFloat(day?.temp?.min) || null;
                 precipitationProbabilityDay = safeParseInt(nwsPop) || null;
                 precipitationProbabilityNight = safeParseInt(nwsPopNext) || null;
                 description = nwsText || null;
@@ -444,7 +444,7 @@ export function parseWeatherData(point, raw_owm, raw_nws, raw_alerts, spc_outloo
                 conditionDay = parseWeatherCondition(dayWeatherDesc || null) || { condition: "Unknown", code: 0, raw: dayWeatherDesc };
                 conditionNight = parseWeatherCondition(nwsWeather || null) || { condition: "Unknown", code: 0, raw: nwsWeather };
                 highTemp = safeParseFloat(day?.temp?.max) || null;
-                lowTemp = safeParseFloat(nwsTempValue * 5/9 + 273.15) || safeParseFloat(day?.temp?.min) || null;
+                lowTemp = safeParseFloat((nwsTempValue - 32) * 5/9 + 273.15) || safeParseFloat(day?.temp?.min) || null;
                 precipitationProbabilityDay = null;
                 precipitationProbabilityNight = safeParseInt(nwsPop) || null;
                 description = nwsText || null;
