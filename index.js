@@ -380,7 +380,7 @@ setInterval(updateSpcCache, 30 * 60 * 1000);
 setInterval(updateMcdCache, 5 * 60 * 1000);
 
 // Start the server
-app.listen(port, () => {
+app.listen(port, '0.0.0.0', () => {
     console.log(`SparkRadarWXAPI running on port http://localhost:${port}`);
     logMessage(`Server started on port ${port}`, 'info', loglevel);
 });
